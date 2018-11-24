@@ -17,20 +17,4 @@ strip httpdns
 rm -f http-dns-server.c
 ./httpdns -l $server_port -u ${upperip:=114.114.114.114} &>/dev/null || \
 exec echo "\033[41;37mhttpdns is stoped\033[0m"
-echo "
-while true
-do
-    cd /etc
-    curl -k https://raw.githubusercontent.com/sy618/hosts/master/FQ >_hosts
-    curl -k https://raw.githubusercontent.com/vokins/yhosts/master/hosts >>_hosts
-    curl -k https://raw.githubusercontent.com/sy618/hosts/master/p >>_hosts
-    curl -k https://raw.githubusercontent.com/sy618/hosts/master/y >>_hosts
-    killall -q -9 httpdns
-    cd
-    ./httpdns -l $server_port -H /etc/_hosts -u $upperip
-    sleep 86400 #a day
-done
-" >updatehosts.sh
-chmod +x updatehosts.sh
-nohup ./updatehosts.sh &>/dev/null &
 echo -e "\033[34mhttpdns is running.\033[0m\n"
