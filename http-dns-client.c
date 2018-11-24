@@ -14,7 +14,7 @@
 #include <sys/epoll.h>
 #include <signal.h>
 
-#define DNS_MAX_CONNECTION 128 //此值的大小关系到respod_clients函数的效率
+#define DNS_MAX_CONNECTION 256 //此值的大小关系到respod_clients函数的效率
 #define DATA_SIZE 512
 #define HTTP_RSP_SIZE 1024
 
@@ -40,75 +40,30 @@ dns_t dns_list[DNS_MAX_CONNECTION];
 struct epoll_event evs[DNS_MAX_CONNECTION+1], ev;
 char http_rsp[HTTP_RSP_SIZE + 1];
 struct sockaddr_in dst_addr;
-//当请求为IP查询域名类型时，返回固定的域名，不联网检查以节省资源，开头的0为域名字段的长度，启动时会自动修改该值
-char PTR_domain[] = {0, 7, 'm', 'd', 'b', 'y', 'b', 'y', 'd', 3, 't', 'o', 'p', 0}, *cachePath = NULL, *host_value;
+char *host_value;
 int dnsListenFd = -1, dns_efd;
 unsigned int host_value_len;
 /* 缓存变量 */
 FILE *cfp = NULL;
+char *cachePath = NULL;
 struct dns_cache *cache, *cache_temp;
 socklen_t addr_len = sizeof(dst_addr);
 unsigned int cache_using, cacheLimit;
 
 void help(int ret)
 {
-    puts("httpdns(v0.1):\n"
+    puts("httpdns(v0.2):\n"
     "    -l [监听ip:]监听端口\n"
     "    -d 目标ip[:目标端口]\n"
     "    -c 缓存路径\n"
     "    -L 限制缓存数目\n"
+    "    -u 设置运行uid\n"
     "    -H 设置Host\n"
     "    -h 显示这个信息\n");
     exit(ret);
 }
 
-/* 因为某些系统库的memcpy不能src + len > dst，这个函数正是为了解决这样的问题，但是效率低一点点 */
-#ifdef XMEMCPY
-typedef struct bit128 {
-    char data[16];
-} bit128_t;
-typedef struct bit256 {
-    char data[32];
-} bit256_t;
-void xmemcpy(char *src, const char *dst, size_t len)
-{
-    bit256_t *to256 = (bit256_t *)src, *from256 = (bit256_t *)dst;
-    while (len >= sizeof(bit256_t))
-    {
-        *to256++ = *from256++;
-        len -= sizeof(bit256_t);
-    }
-    if (len >= sizeof(bit128_t))
-    {
-        bit128_t *to128 = (bit128_t *)to256;
-        *to128 = *(bit128_t *)from256;
-        src = (char *)(to128 + 1);
-        dst = (char *)((bit128_t *)from256 + 1);
-        len -= sizeof(bit128_t);
-    }
-    else
-    {
-        src = (char *)to256;
-        dst = (char *)from256;
-    }
-    /*
-    if (len >= sizeof(int64_t))
-    {
-        int64_t *to64 = (int64_t *)src;
-        *to64 = *(int64_t *)dst;
-        src = (char *)(to64 + 1);
-        dst += sizeof(int64_t);
-        len -= sizeof(int64_t);
-    }
-    */
-    while (len--)
-        *src++ = *dst++;
-}
-#else
-#define xmemcpy memcpy
-#endif
-
-int8_t read_cache_file()
+int read_cache_file()
 {
     char *buff, *answer, *question;
     long file_size;
@@ -187,7 +142,7 @@ void write_dns_cache()
 }
 
 
-inline char *cache_lookup(char *question, dns_t *dns)
+char *cache_lookup(char *question, dns_t *dns)
 {
     struct dns_cache *c;
 
@@ -238,7 +193,7 @@ void cache_record(dns_t *dns)
 }
 
 
-inline int8_t respond_client(dns_t *dns)
+int respond_client(dns_t *dns)
 {
     int write_len = sendto(dnsListenFd, dns->dns_req, dns->dns_rsp_len, 0, (struct sockaddr *)&dns->src_addr, sizeof(struct sockaddr_in));
     if (write_len == dns->dns_rsp_len)
@@ -251,12 +206,12 @@ inline int8_t respond_client(dns_t *dns)
     else
     {
         dns->dns_rsp_len -= write_len;
-        xmemcpy(dns->dns_req, dns->dns_req + write_len, dns->dns_rsp_len);
+        memcpy(dns->dns_req, dns->dns_req + write_len, dns->dns_rsp_len);
         return 1;
     }
 }
 
-inline void respond_clients()
+void respond_clients()
 {
     int i;
     for (i = 0; i < DNS_MAX_CONNECTION; i++)
@@ -275,15 +230,15 @@ inline void respond_clients()
 }
 
 /* 分析DNS请求 */
-int8_t parse_dns_request(char *dns_req, dns_t *dns)
+int parse_dns_request(char *dns_req, dns_t *dns)
 {
     dns_req += 13; //跳到域名部分
     dns->host_len = strlen(dns_req);
     //判断请求类型
     switch ((dns->query_type = *(dns_req + 2 + dns->host_len)))
     {
-        case 28:    //查询ipv6地址
-            dns->query_type = 1; //httpDNS不支持查询ipv6，所以改成ipv4
+        //case 28:    //查询ipv6地址
+            //dns->query_type = 1; //httpDNS不支持查询ipv6，所以改成ipv4
             
         case 1:    //查询ipv4地址
             dns->host = strdup(dns_req);
@@ -300,21 +255,22 @@ int8_t parse_dns_request(char *dns_req, dns_t *dns)
                 }
                 dns->host[len++] = '.';
             }
-            return 0;
+        return 0;
             
         default:
-            return 1;
+            dns->host = NULL;
+        return 1;
     }
 }
 
 /* 建立DNS回应 */
-int8_t build_dns_response(dns_t *dns)
+int build_dns_response(dns_t *dns)
 {
     char *p;
 
     //18: 查询资源的前(12字节)后(6字节)部分
     if (dns->reply)
-        dns->dns_rsp_len = 18 + dns->host_len + 12 + *dns->reply;
+        dns->dns_rsp_len = 18 + dns->host_len + 16;
     else
         dns->dns_rsp_len = 18 + dns->host_len;
     if (dns->dns_rsp_len > DATA_SIZE)
@@ -359,8 +315,8 @@ int8_t build_dns_response(dns_t *dns)
         p[9] = 16;
         /* 回应长度 */
         p[10] = 0;
-        //p[11] = 4;  //reply中包含回应长度
-        strcpy(p+11, dns->reply);
+        p[11] = 4;  //reply中包含回应长度
+        strcpy(p+12, dns->reply);
     }
     else
     {
@@ -397,7 +353,7 @@ void http_out(dns_t *out)
     {
         //puts("write a little");
         out->http_request_len -= write_len;
-        xmemcpy(out->http_request, out->http_request + write_len, out->http_request_len);
+        memcpy(out->http_request, out->http_request + write_len, out->http_request_len);
     }
     else
     {
@@ -436,7 +392,7 @@ void http_in(dns_t *in)
         p = http_rsp;
     epoll_ctl(dns_efd, EPOLL_CTL_DEL, in->fd, NULL);
     close(in->fd);
-    in->reply = (char *)malloc(6);
+    in->reply = (char *)malloc(5);
     if (in->reply == NULL)
         goto error;
     do {
@@ -454,13 +410,12 @@ void http_in(dns_t *in)
                 //查找下一行
                 if (p - ip_ptr > 3)
                     break;
-                in->reply[++i] = atoi(ip_ptr);
+                in->reply[i++] = atoi(ip_ptr);
             }
             else
             {
-                in->reply[i+1] = atoi(ip_ptr);
-                in->reply[0] = 4;
-                in->reply[5] = '\0';
+                in->reply[3] = atoi(ip_ptr);
+                in->reply[4] = 0;
                 build_dns_response(in);
                 if (cfp)
                     cache_record(in);
@@ -490,6 +445,7 @@ void new_client()
         return;
     dns = &dns_list[i];
     len = recvfrom(dnsListenFd, &dns->dns_req, DATA_SIZE, 0, (struct sockaddr *)&dns->src_addr, &addr_len);
+    //printf("addr: [%s:%d]\n", inet_ntoa(dns->src_addr.sin_addr), ntohs(dns->src_addr.sin_port));
     //dns请求必须大于18
     if (len <= 18)
         return;
@@ -506,9 +462,8 @@ void new_client()
     }
     if (parse_dns_request(dns->dns_req, dns) != 0)
     {
-        if (dns->query_type == 12)
+        if (dns->host == NULL)
         {
-            dns->reply = PTR_domain;
             if (build_dns_response(dns) != 0)
                 dns->query_type = 0;
         }
@@ -519,12 +474,16 @@ void new_client()
     dns->fd = socket(AF_INET, SOCK_STREAM, 0);
     if (dns->fd < 0)
     {
-        free(dns->http_request);
         dns->query_type = 0;
         return;
     }
     fcntl(dns->fd, F_SETFL, O_NONBLOCK);
-    connect(dns->fd, (struct sockaddr *)&dst_addr, sizeof(dst_addr));
+    if (connect(dns->fd, (struct sockaddr *)&dst_addr, sizeof(dst_addr)) != 0 && errno != EINPROGRESS)
+    {
+        close(dns->fd);
+        dns->query_type = 0;
+        return;
+    }
     /* "GET /d?dn=" + dns->host + " HTTP/1.0\r\nHost: " + host_value + "\r\n\r\n" */
     dns->http_request = (char *)malloc(10 + strlen(dns->host) + 17 + host_value_len + 4 + 1);
     free(dns->host);
@@ -537,13 +496,7 @@ void new_client()
     dns->http_request_len = sprintf(dns->http_request, "GET /d?dn=%s HTTP/1.0\r\nHost: %s\r\n\r\n", dns->host, host_value);
     ev.events = EPOLLOUT|EPOLLERR|EPOLLET;
     ev.data.ptr = dns;
-    if (epoll_ctl(dns_efd, EPOLL_CTL_ADD, dns->fd, &ev) != 0)
-    {
-        close(dns->fd);
-        free(dns->http_request);
-        dns->query_type = 0;
-        return;
-    }
+    epoll_ctl(dns_efd, EPOLL_CTL_ADD, dns->fd, &ev);
 }
 
 void start_server()
@@ -562,8 +515,6 @@ void start_server()
     epoll_ctl(dns_efd, EPOLL_CTL_ADD, dnsListenFd, &ev);
     memset(dns_list, 0, sizeof(dns_list));
 
-    //设置IP查询域名的大小
-    PTR_domain[0] = sizeof(PTR_domain) - 1;
     while (1)
     {
         n = epoll_wait(dns_efd, evs, DNS_MAX_CONNECTION + 1, -1);
@@ -635,7 +586,7 @@ int main(int argc, char *argv[])
     char *p;
     int opt;
     
-    while ((opt = getopt(argc, argv, "d:l:c:L:H:h")) != -1)
+    while ((opt = getopt(argc, argv, "d:l:c:u:L:H:h")) != -1)
     {
         switch (opt)
         {
@@ -673,6 +624,14 @@ int main(int argc, char *argv[])
                 read_cache_file();
             break;
             
+            case 'u':
+                if (setgid(atoi(optarg)) || setuid(atoi(optarg)))
+                {
+                    perror("setgid(setuid)");
+                    return 1;
+                }
+            break;
+            
             case 'L':
                 cacheLimit = atoi(optarg);
             break;
@@ -698,9 +657,8 @@ int main(int argc, char *argv[])
     //程序结束时写入缓存
     signal(SIGTERM, write_dns_cache);
     //设置IP查询域名的大小
-    PTR_domain[0] = sizeof(PTR_domain) - 1;
     host_value_len = strlen(host_value);
     start_server();
 
     return 0;
-} 
+}
