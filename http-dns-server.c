@@ -348,11 +348,11 @@ void read_client(dns_t *in)
         domain_size = domain_end - domain_begin - 1;
     else
         domain_size = domain_end - domain_begin;
+    if (encodeCode)
+        dataEncode(domain_begin, domain_size);
     domain = strndup(domain_begin, domain_size);
     if (domain == NULL || domain_size <= 0)
         goto response_client;
-    if (encodeCode)
-        dataEncode(domain, domain_size);
     if (hostsfp && (ips = hosts_lookup(domain)) != NULL)
     {
         free(domain);
