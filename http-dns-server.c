@@ -46,7 +46,7 @@ socklen_t addr_len;
 
 void usage(int exitCode)
 {
-    fprintf(exitCode ? stderr : stdout, "http dns server(v0.2):\n"
+    fprintf(exitCode ? stderr : stdout, "http dns server(v0.3):\n"
     "    -l [listen_ip:]listen_port  \033[35G default listen_ip is 0.0.0.0\n"
     "    -u upper_ip[:upper_port]  \033[35G default upper is %s:53\n"
     "    -e                                    \033[35G set encode domain code(1-127)\n"
@@ -159,7 +159,8 @@ char *hosts_lookup(char *host)
 void close_client(dns_t *dns)
 {
     close(dns->fd);
-    free(dns->http_rsp);
+    if (dns->http_rsp_len != sizeof(ERROR_MSG) - 1)  //ERROR_MSG not free()
+        free(dns->http_rsp);
     dns->http_rsp = NULL;
     dns->sent_len = dns->dns_req_len = 0;
     dns->fd = -1;
@@ -189,11 +190,7 @@ void response_client(dns_t *out)
 {
     int write_len = write(out->fd, out->http_rsp + out->sent_len, out->http_rsp_len - out->sent_len);
     if (write_len == out->http_rsp_len - out->sent_len || write_len == -1)
-    {
-        if (out->http_rsp[9] == '4')  //ERROR_MSG not free()
-            out->http_rsp = NULL;
         close_client(out);
-    }
     else
         out->sent_len += write_len;
 }
@@ -261,7 +258,7 @@ void query_dns()
     
 void recv_dns_rsp()
 {
-    static char rsp_data[BUFF_SIZE + 1], *p, *ips;
+    static char rsp_data[BUFF_SIZE + 1], *p, *ips, *ips_save;
     unsigned char *_p;
     dns_t *dns;
     int len, ips_len;
@@ -288,9 +285,13 @@ void recv_dns_rsp()
             p += *p + 12;
             continue;
         }
+        ips_save = ips;
         ips = (char *)realloc(ips, ips_len + 16);
         if (ips == NULL)
+        {
+            ips = ips_save;
             break;
+        }
         _p = (unsigned char *)p + 1;
         ips_len += sprintf(ips + ips_len, "%d.%d.%d.%d", _p[0], _p[1], _p[2], _p[3]);
         p += 16; //next address
@@ -302,7 +303,7 @@ void recv_dns_rsp()
         //printf("ips %s\n", ips);
         build_http_rsp(dns, ips);
         free(ips);
-        if (dns->http_rsp)
+       if (dns->http_rsp)
         {
             response_client(dns);
             if (dns->http_rsp == NULL)
