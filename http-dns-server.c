@@ -36,7 +36,7 @@ struct dns_hosts {
 #define SUCCESS_HEADER "HTTP/1.0 200 OK\r\nVia: Mmmdbybyd(HTTP-DNS Server)\r\n\r\n"
 dns_t dns_list[MAX_FD - 2];
 struct epoll_event evs[MAX_FD - 1], ev;
-int8_t encodeCode = -1;
+int8_t encodeCode = 0;
 /* hosts变量 */
 char *hosts_path = NULL;
 FILE *hostsfp = NULL;
