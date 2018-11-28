@@ -14,6 +14,7 @@
 #include <signal.h>
 #include <errno.h>
 
+#define DEFAULT_UPPER_IP "114.114.114.114"
 #define MAX_FD 1024
 #define DNS_REQUEST_SIZE 512
 #define BUFF_SIZE 1024
@@ -31,10 +32,11 @@ struct dns_hosts {
     struct dns_hosts *next;
 };
 
-char errMsg[] = "HTTP/1.0 404 Not Found\r\nVia: Mmmdbybyd(HTTP-DNS Server)\r\nContent-type: charset=utf-8\r\n\r\n<html><head><title>HTTP DNS Server</title></head><body>查询域名失败<br/><br/>By: 萌萌萌得不要不要哒</body></html>";
-char success_header[] = "HTTP/1.0 200 OK\r\nVia: Mmmdbybyd(HTTP-DNS Server)\r\n\r\n";
+#define ERROR_MSG "HTTP/1.0 404 Not Found\r\nVia: Mmmdbybyd(HTTP-DNS Server)\r\nContent-type: charset=utf-8\r\n\r\n<html><head><title>HTTP DNS Server</title></head><body>查询域名失败<br/><br/>By: 萌萌萌得不要不要哒</body></html>"
+#define SUCCESS_HEADER "HTTP/1.0 200 OK\r\nVia: Mmmdbybyd(HTTP-DNS Server)\r\n\r\n"
 dns_t dns_list[MAX_FD - 2];
 struct epoll_event evs[MAX_FD - 1], ev;
+int8_t encodeCode = -1;
 /* hosts变量 */
 char *hosts_path = NULL;
 FILE *hostsfp = NULL;
@@ -42,14 +44,15 @@ struct dns_hosts *hosts, *last_hosts = NULL;
 int listenFd, dstFd, eFd;
 socklen_t addr_len;
 
-void usage(int code)
+void usage(int exitCode)
 {
-    fputs("http dns server(v0.1):\n"
+    fprintf(exitCode ? stderr : stdout, "http dns server(v0.2):\n"
     "    -l [listen_ip:]listen_port  \033[35G default listen_ip is 0.0.0.0\n"
-    "    -u upper_ip[:upper_port]  \033[35G default upper is 114.114.114.114:53\n"
+    "    -u upper_ip[:upper_port]  \033[35G default upper is %s:53\n"
+    "    -e                                    \033[35G set encode domain code(1-127)\n"
     "    -H hosts file path  \033[35G default none\n"
-    "    -h \033[35G display this information\n", code ? stderr : stdout);
-    exit(code);
+    "    -h \033[35G display this information\n", DEFAULT_UPPER_IP);
+    exit(exitCode);
 }
 
 int read_hosts_file(char *path)
@@ -162,14 +165,23 @@ void close_client(dns_t *dns)
     dns->fd = -1;
 }
 
+/* encode domain and ipAddress */
+void dataEncode(char *data, int data_len)
+{
+    while (data_len-- > 0)
+        data[data_len] ^= encodeCode;
+}
+
 void build_http_rsp(dns_t *dns, char *ips)
 {
-    dns->http_rsp_len = sizeof(success_header) + strlen(ips) - 1;
+    if (encodeCode)
+        dataEncode(ips,strlen(ips));
+    dns->http_rsp_len = sizeof(SUCCESS_HEADER) - 1 + strlen(ips);
     dns->http_rsp = (char *)malloc(dns->http_rsp_len + 1);
     if (dns->http_rsp == NULL)
         return;
-    strcpy(dns->http_rsp, success_header);
-    strcpy(dns->http_rsp + sizeof(success_header) - 1, ips);
+    strcpy(dns->http_rsp, SUCCESS_HEADER);
+    strcpy(dns->http_rsp + sizeof(SUCCESS_HEADER) - 1, ips);
     dns->sent_len = 0;
 }
 
@@ -178,7 +190,7 @@ void response_client(dns_t *out)
     int write_len = write(out->fd, out->http_rsp + out->sent_len, out->http_rsp_len - out->sent_len);
     if (write_len == out->http_rsp_len - out->sent_len || write_len == -1)
     {
-        if (out->http_rsp == errMsg)
+        if (out->http_rsp[9] == '4')  //ERROR_MSG not free()
             out->http_rsp = NULL;
         close_client(out);
     }
@@ -208,13 +220,12 @@ void build_dns_req(dns_t *dns, char *domain, int domain_size)
 
 int send_dns_req(char *dns_req, int req_len)
 {
-    int write_len = write(dstFd, dns_req, req_len);
+    int write_len;
+
+    write_len = write(dstFd, dns_req, req_len);
     if (write_len == req_len)
         return 0;
-    else if (write_len >= 0)
-        return write_len;
-    else
-        return -1;
+    return write_len;
 }
 
 void query_dns()
@@ -248,84 +259,67 @@ void query_dns()
     epoll_ctl(eFd, EPOLL_CTL_MOD, dstFd, &ev);
 }
     
-void accept_dns_rsp()
+void recv_dns_rsp()
 {
     static char rsp_data[BUFF_SIZE + 1], *p, *ips;
     unsigned char *_p;
     dns_t *dns;
     int len, ips_len;
 
-    while ((len = read(dstFd, rsp_data, BUFF_SIZE)) > 1)
+    len = read(dstFd, rsp_data, BUFF_SIZE);
+    if (len < 2 || *(int16_t *)rsp_data > MAX_FD - 3)
+        return;
+    dns = &dns_list[*(int16_t *)rsp_data];
+    dns->sent_len = 0;
+    dns->http_rsp = ERROR_MSG;
+    dns->http_rsp_len = sizeof(ERROR_MSG) - 1;
+    if (dns->dns_req_len + 12 > len || (unsigned char)rsp_data[3] != 128 /*(signed char) max is 127*/)
+        goto modEvToOut;
+    rsp_data[len] = '\0';
+    /* get ips */
+    p = rsp_data + dns->dns_req_len + 11;
+    ips_len = 0;
+    ips = NULL;
+    while (p - rsp_data + 4 <= len)
     {
-        if (*(int16_t *)rsp_data > MAX_FD - 3)
+        //type
+        if (*(p - 8) != 1)
+        {
+            p += *p + 12;
             continue;
-        dns = &dns_list[*(int16_t *)rsp_data];
-        dns->sent_len = 0;
-        if (dns->dns_req_len + 12 > len)
-        {
-            dns->http_rsp = errMsg;
-            dns->http_rsp_len = sizeof(errMsg);
-            goto modEvToOut;
         }
-        if ((unsigned char)rsp_data[3] != 128) //char只有7位可用，则正数最高为127
-        {
-            dns->http_rsp = errMsg;
-            dns->http_rsp_len = sizeof(errMsg);
-            goto modEvToOut;
-        }
-        rsp_data[len] = '\0';
-        /* get ips */
-        p = rsp_data + dns->dns_req_len + 11;
-        ips_len = 0;
-        ips = NULL;
-        while (p - rsp_data + 4 <= len)
-        {
-            //type
-            if (*(p - 8) != 1)
-            {
-                p += *p + 12;
-                continue;
-            }
-            ips = (char *)realloc(ips, ips_len + 16);
-            if (ips == NULL)
-                break;
-            _p = (unsigned char *)p + 1;
-            ips_len += sprintf(ips + ips_len, "%d.%d.%d.%d", _p[0], _p[1], _p[2], _p[3]);
-            p += 16; //next address
-            ips[ips_len++] = ';';
-        }
-        if (ips)
-        {
-            ips[ips_len - 1] = '\0';
-            //printf("ips %s\n", ips);
-            build_http_rsp(dns, ips);
-            free(ips);
-            if (dns->http_rsp)
-            {
-                response_client(dns);
-                if (dns->http_rsp == NULL)
-                    continue;
-            }
-            else
-            {
-                dns->http_rsp = errMsg;
-                dns->http_rsp_len = sizeof(errMsg);
-            }
-        }
-        else
-        {
-            dns->http_rsp = errMsg;
-            dns->http_rsp_len = sizeof(errMsg);
-        }
-        modEvToOut:
-        ev.data.ptr = dns;
-        ev.events = EPOLLOUT|EPOLLET;
-        epoll_ctl(eFd, EPOLL_CTL_MOD, dns->fd, &ev);
+        ips = (char *)realloc(ips, ips_len + 16);
+        if (ips == NULL)
+            break;
+        _p = (unsigned char *)p + 1;
+        ips_len += sprintf(ips + ips_len, "%d.%d.%d.%d", _p[0], _p[1], _p[2], _p[3]);
+        p += 16; //next address
+        ips[ips_len++] = ';';
     }
-    
+    if (ips)
+    {
+        ips[ips_len - 1] = '\0';
+        //printf("ips %s\n", ips);
+        build_http_rsp(dns, ips);
+        free(ips);
+        if (dns->http_rsp)
+        {
+            response_client(dns);
+            if (dns->http_rsp == NULL)
+            {
+                dns->http_rsp = ERROR_MSG;
+                dns->http_rsp_len = sizeof(ERROR_MSG) - 1;
+            }
+        }
+    }
+    modEvToOut:
+    ev.data.ptr = dns;
+    ev.events = EPOLLOUT|EPOLLET;
+    epoll_ctl(eFd, EPOLL_CTL_MOD, dns->fd, &ev);
 }
 
-void read_client(dns_t *in) {
+void read_client(dns_t *in)
+{
     static char  httpReq[BUFF_SIZE+1];
     int domain_size, httpReq_len;
     char *domain_begin, *domain_end, *domain = NULL, *ips;
@@ -338,44 +332,35 @@ void read_client(dns_t *in) {
         return;
     }
     httpReq[httpReq_len] = '\0';
-
+    in->http_rsp = ERROR_MSG;
+    in->http_rsp_len = sizeof(ERROR_MSG) - 1;
     if ((domain_begin = strstr(httpReq, "?dn=")))
         domain_begin += 4;
     else if ((domain_begin = strstr(httpReq, "?host=")))
         domain_begin += 6;
     else
-    {
-        in->http_rsp = errMsg;
-        in->http_rsp_len = sizeof(errMsg);
         goto response_client;
-    }
 
     domain_end = strchr(domain_begin, ' ');
     if (domain_end == NULL)
-    {
-        in->http_rsp = errMsg;
-        in->http_rsp_len = sizeof(errMsg);
         goto response_client;
-    }
     if (*(domain_end - 1) == '.')
         domain_size = domain_end - domain_begin - 1;
     else
         domain_size = domain_end - domain_begin;
     domain = strndup(domain_begin, domain_size);
     if (domain == NULL || domain_size <= 0)
-    {
-        in->http_rsp = errMsg;
-        in->http_rsp_len = sizeof(errMsg);
         goto response_client;
-    }
+    if (encodeCode)
+        dataEncode(domain, domain_size);
     if (hostsfp && (ips = hosts_lookup(domain)) != NULL)
     {
         free(domain);
         build_http_rsp(in, ips);
         if (in->http_rsp == NULL)
         {
-            in->http_rsp = errMsg;
-            in->http_rsp_len = sizeof(errMsg);
+            in->http_rsp = ERROR_MSG;
+            in->http_rsp_len = sizeof(ERROR_MSG) - 1;
         }
     }
     else
@@ -459,36 +444,26 @@ void start_server()
         {
             if (evs[n].data.fd == listenFd)
             {
-            //puts("1");
                 accept_client();
-            //puts("2");
             }
             else if (evs[n].data.fd == dstFd)
             {
                 if (evs[n].events & EPOLLIN)
                 {
-            //puts("3");
-                    accept_dns_rsp();
-            //puts("4");
+                    recv_dns_rsp();
                 }
                 else if (evs[n].events & EPOLLOUT)
                 {
-            //puts("5");
                     query_dns();
-            //puts("6");
                 }
             }
             else if (evs[n].events & EPOLLIN)
             {
-            //puts("7");
                 read_client(evs[n].data.ptr);
-            //puts("8");
             }
             else if (evs[n].events & EPOLLOUT)
             {
-            //puts("9");
                 response_client(evs[n].data.ptr);
-            //puts("10");
             }
         }
     }
@@ -503,9 +478,12 @@ int initialize(int argc, char *argv[])
     //PIPE
     signal(SIGPIPE, SIG_IGN);
     addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = inet_addr(DEFAULT_UPPER_IP);
+    addr.sin_port = htons(53);
     addr_len = sizeof(addr);
-    dstFd = socket(AF_INET, SOCK_DGRAM, 0);
     listenFd = socket(AF_INET, SOCK_STREAM, 0);
+    dstFd = socket(AF_INET, SOCK_DGRAM, 0);
+    connect(dstFd, (struct sockaddr *)&addr, sizeof(addr));
     if (dstFd < 0 || listenFd < 0)
     {
         perror("socket");
@@ -513,7 +491,7 @@ int initialize(int argc, char *argv[])
     }
     fcntl(dstFd, F_SETFL, O_NONBLOCK);
     fcntl(listenFd, F_SETFL, O_NONBLOCK);
-    while ((opt = getopt(argc, argv, ":l:H:u:h")) != -1)
+    while ((opt = getopt(argc, argv, ":l:H:e:u:h")) != -1)
     {
         switch(opt)
         {
@@ -545,6 +523,10 @@ int initialize(int argc, char *argv[])
                     perror("listen");
                     return 1;
                 }
+            break;
+            
+            case 'e':
+                encodeCode = (int8_t)atoi(optarg);
             break;
 
             case 'H':
@@ -588,6 +570,7 @@ int initialize(int argc, char *argv[])
     ev.events = EPOLLIN;
     epoll_ctl(eFd, EPOLL_CTL_ADD, listenFd, &ev);
     ev.data.fd = dstFd;
+    ev.events = EPOLLIN|EPOLLET;
     epoll_ctl(eFd, EPOLL_CTL_ADD, dstFd, &ev);
     memset(dns_list, 0, sizeof(dns_list));
     //初始化DNS请求结构

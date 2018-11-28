@@ -43,6 +43,7 @@ struct sockaddr_in dst_addr;
 char *host_value;
 int dnsListenFd = -1, dns_efd;
 unsigned int host_value_len;
+int8_t encodeCode = 0;
 /* 缓存变量 */
 FILE *cfp = NULL;
 char *cachePath = NULL;
@@ -52,15 +53,23 @@ unsigned int cache_using, cacheLimit;
 
 void help(int ret)
 {
-    puts("httpdns(v0.2):\n"
+    puts("httpdns(v0.3):\n"
     "    -l [监听ip:]监听端口\n"
     "    -d 目标ip[:目标端口]\n"
     "    -c 缓存路径\n"
     "    -L 限制缓存数目\n"
     "    -u 设置运行uid\n"
+    "    -e 设置域名编码编号(1-127)\n"
     "    -H 设置Host\n"
     "    -h 显示这个信息\n");
     exit(ret);
+}
+
+/* 对数据进行编码 */
+void dataEncode(char *data, int data_len)
+{
+    while (data_len-- > 0)
+        data[data_len] ^= encodeCode;
 }
 
 int read_cache_file()
@@ -378,6 +387,8 @@ void http_in(dns_t *in)
         close(in->fd);
         return;
     }
+    if (encodeCode)
+        dataEncode(http_rsp, len);
     http_rsp[len] = '\0';
     //printf("[%s]\n", http_rsp);
     p = strstr(http_rsp, "\n\r");
@@ -484,6 +495,8 @@ void new_client()
         dns->query_type = 0;
         return;
     }
+    if (encodeCode)
+        dataEncode(dns->host, strlen(dns->host));
     /* "GET /d?dn=" + dns->host + " HTTP/1.0\r\nHost: " + host_value + "\r\n\r\n" */
     dns->http_request = (char *)malloc(10 + strlen(dns->host) + 17 + host_value_len + 4 + 1);
     free(dns->host);
@@ -586,7 +599,7 @@ int main(int argc, char *argv[])
     char *p;
     int opt;
     
-    while ((opt = getopt(argc, argv, "d:l:c:u:L:H:h")) != -1)
+    while ((opt = getopt(argc, argv, "d:l:c:u:e:L:H:h")) != -1)
     {
         switch (opt)
         {
@@ -630,6 +643,10 @@ int main(int argc, char *argv[])
                     perror("setgid(setuid)");
                     return 1;
                 }
+            break;
+            
+            case 'e':
+                encodeCode = (int8_t)atoi(optarg);
             break;
             
             case 'L':
