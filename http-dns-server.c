@@ -46,7 +46,7 @@ socklen_t addr_len;
 
 void usage(int exitCode)
 {
-    fprintf(exitCode ? stderr : stdout, "http dns server(v0.3):\n"
+    fprintf(exitCode ? stderr : stdout, "http dns server(v0.2):\n"
     "    -l [listen_ip:]listen_port  \033[35G default listen_ip is 0.0.0.0\n"
     "    -u upper_ip[:upper_port]  \033[35G default upper is %s:53\n"
     "    -e                                    \033[35G set encode domain code(1-127)\n"
